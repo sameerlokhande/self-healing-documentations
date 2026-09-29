@@ -1,27 +1,72 @@
 name: "Self-Healing Technical Documentation"
-description: "Detects documentation drift caused by pull request code changes and automatically generates doc repairs."
+description: "Automatically detects code drift and heals documentation using local LLMs."
+author: "Sameer Lokhande"
+
 inputs:
   github_token:
-    description: "GitHub Token for opening PRs and adding comments"
+    description: "GitHub Token for committing changes back to the repository"
     required: true
-  ollama_host:
-    description: "Address of Ollama instance"
+    default: ${{ github.token }}
+  model:
+    description: "Ollama model identifier"
     required: false
-    default: "http://localhost:11434"
-  ollama_model:
-    description: "Model used for staleness evaluation and doc rewriting"
-    required: false
-    default: "qwen2.5-coder:7b"
+    default: "qwen2.5-coder:1.5b"
   confidence_threshold:
-    description: "Score threshold (0.0 to 1.0) required to auto-open a repair PR vs posting a review comment"
+    description: "Minimum staleness confidence score to trigger doc patching"
     required: false
-    default: "0.80"
+    default: "0.75"
+  auto_commit:
+    description: "Whether to commit and push doc updates automatically"
+    required: false
+    default: "true"
 
 runs:
-  using: "docker"
-  image: "Dockerfile"
-  env:
-    GITHUB_TOKEN: ${{ inputs.github_token }}
-    OLLAMA_HOST: ${{ inputs.ollama_host }}
-    OLLAMA_MODEL: ${{ inputs.ollama_model }}
-    CONFIDENCE_THRESHOLD: ${{ inputs.confidence_threshold }}
+  using: "composite"
+  steps:
+    - name: Initialize Ollama Runtime
+      shell: bash
+      run: |
+        echo "Installing and preparing local LLM engine..."
+        curl -fsSL https://ollama.com/install.sh | sh
+        sudo systemctl stop ollama || true
+        OLLAMA_HOST=0.0.0.0:11434 OLLAMA_ORIGINS="*" ollama serve &
+        
+        until curl -s http://127.0.0.1:11434/api/tags > /dev/null; do
+          sleep 1
+        done
+        
+        ollama pull ${{ inputs.model }}
+
+    - name: Execute Drift Detection & Healing
+      shell: bash
+      run: |
+        echo "Building and running self-healing container..."
+        docker build -t self-healing-engine "${{ github.action_path }}"
+        docker run --rm \
+          -v "${{ github.workspace }}:/github/workspace" \
+          -e INPUT_GITHUB_TOKEN="${{ inputs.github_token }}" \
+          -e INPUT_CONFIDENCE_THRESHOLD="${{ inputs.confidence_threshold }}" \
+          -e INPUT_OLLAMA_MODEL="${{ inputs.model }}" \
+          -e OLLAMA_HOST="http://172.17.0.1:11434" \
+          -e GITHUB_WORKSPACE="/github/workspace" \
+          -e GITHUB_HEAD_REF="${{ github.head_ref }}" \
+          -e GITHUB_REF_NAME="${{ github.ref_name }}" \
+          self-healing-engine
+
+    - name: Commit and Push Synchronized Documentation
+      if: inputs.auto_commit == 'true'
+      shell: bash
+      run: |
+        cd "${{ github.workspace }}"
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+        
+        if [[ -n $(git status --porcelain "*.md") ]]; then
+          echo "Documentation drift detected. Committing fixes..."
+          git add *.md
+          git commit -m "docs(parity): synchronize documentation with code changes [skip ci]"
+          TARGET_BRANCH="${{ github.head_ref || github.ref_name }}"
+          git push origin HEAD:"$TARGET_BRANCH"
+        else
+          echo "Documentation is already synchronized; no updates required."
+        fi
