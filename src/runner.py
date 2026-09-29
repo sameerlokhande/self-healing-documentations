@@ -7,6 +7,8 @@ from src.detector.diff_parser import DiffAnalyzer
 from src.detector.staleness_eval import StalenessEvaluator
 from src.repair.patcher import DocPatcher
 from src.repair.verifier import DocVerifier
+import subprocess
+
 
 def apply_section_patch_to_file(file_path: Path, heading_title: str, new_content: str):
     text = file_path.read_text(encoding="utf-8")
@@ -28,7 +30,10 @@ def apply_section_patch_to_file(file_path: Path, heading_title: str, new_content
 
     file_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
+
 def main():
+    # Allow git access to mounted workspaces across different container UIDs
+    subprocess.run(["git", "config", "--global", "--add", "safe.directory", "*"], check=False)
     repo_root = Path(os.getenv("GITHUB_WORKSPACE", ".")).resolve()
     cache_dir = repo_root / ".cache"
     ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
