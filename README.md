@@ -9,5 +9,3 @@ This tool solves this by treating documentation as a dependency graph of the cod
 1. It indexes code entities (functions, classes) and maps them to markdown sections via symbol matching and vector embeddings.
 2. On every PR, it inspects unified git diffs for semantic signature changes (ignoring whitespace and internal comments).
 3. If an AST change impacts a documented section, an LLM evaluates staleness, drafts a surgical fix preserving voice and style, verifies the patch via a quality gate, and generates an automated fix.
-
-## Architecture
