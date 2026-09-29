@@ -6,15 +6,20 @@ on:
       - "**.py"
       - "**.md"
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   doc-healing:
-    # This instructs GitHub to run the job on the user's connected laptop
     runs-on: self-hosted
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
+          # Check out the actual PR branch, not the detached merge commit
+          ref: ${{ github.head_ref }}
           fetch-depth: 2
 
       - name: Set up Python
@@ -26,7 +31,6 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      # Connects directly to Ollama already running on the user's laptop
       - name: Run Self-Healing Documentation Engine
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -39,6 +43,7 @@ jobs:
           python -m src.runner
 
       - name: Commit and Push Documentation Fixes
+        shell: bash
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -46,4 +51,6 @@ jobs:
             git add *.md
             git commit -m "docs: auto-heal documentation drift [skip ci]"
             git push
+          else
+            echo "Documentation is already up to date."
           fi
