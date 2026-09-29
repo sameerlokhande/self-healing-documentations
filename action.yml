@@ -1,0 +1,27 @@
+name: "Self-Healing Technical Documentation"
+description: "Detects documentation drift caused by pull request code changes and automatically generates doc repairs."
+inputs:
+  github_token:
+    description: "GitHub Token for opening PRs and adding comments"
+    required: true
+  ollama_host:
+    description: "Address of Ollama instance"
+    required: false
+    default: "http://localhost:11434"
+  ollama_model:
+    description: "Model used for staleness evaluation and doc rewriting"
+    required: false
+    default: "qwen2.5-coder:7b"
+  confidence_threshold:
+    description: "Score threshold (0.0 to 1.0) required to auto-open a repair PR vs posting a review comment"
+    required: false
+    default: "0.80"
+
+runs:
+  using: "docker"
+  image: "Dockerfile"
+  env:
+    GITHUB_TOKEN: ${{ inputs.github_token }}
+    OLLAMA_HOST: ${{ inputs.ollama_host }}
+    OLLAMA_MODEL: ${{ inputs.ollama_model }}
+    CONFIDENCE_THRESHOLD: ${{ inputs.confidence_threshold }}

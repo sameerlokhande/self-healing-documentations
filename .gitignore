@@ -1,0 +1,7 @@
+venv/
+.venv/
+__pycache__/
+*.pyc
+.cache/
+demo_workspace/
+scanned_repo_workspace/
