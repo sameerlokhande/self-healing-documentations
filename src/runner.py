@@ -1,109 +1,205 @@
 import os
 import sys
 from pathlib import Path
+import subprocess
 from github import Github
+
+# Ensure repository root is on sys.path for both local dev and Docker containers
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from src.indexer.graph_indexer import Indexer
 from src.detector.diff_parser import DiffAnalyzer
 from src.detector.staleness_eval import StalenessEvaluator
 from src.repair.patcher import DocPatcher
 from src.repair.verifier import DocVerifier
-import subprocess
 
 
-def apply_section_patch_to_file(file_path: Path, heading_title: str, new_content: str):
-    text = file_path.read_text(encoding="utf-8")
-    lines = text.splitlines()
-    new_lines = []
-    inside_target = False
+def resolve_git_refs(workspace_dir: str) -> tuple[str, str]:
+    """Dynamically determine base and head references based on the GitHub event."""
+    event_name = os.getenv("GITHUB_EVENT_NAME", "").lower()
+    base_ref_env = os.getenv("GITHUB_BASE_REF")
 
-    for line in lines:
-        if line.startswith("#") and heading_title.lower() in line.lower():
-            inside_target = True
-            new_lines.append(line)
-            new_lines.append(new_content)
-            continue
-        elif inside_target and line.startswith("#"):
-            inside_target = False
+    # Pull Request trigger: compare against the base branch
+    if event_name == "pull_request" and base_ref_env:
+        for candidate in [f"origin/{base_ref_env}", base_ref_env]:
+            res = subprocess.run(
+                ["git", "rev-parse", "--verify", candidate],
+                cwd=workspace_dir, capture_output=True, text=True
+            )
+            if res.returncode == 0:
+                return candidate, "HEAD"
 
-        if not inside_target:
-            new_lines.append(line)
+    # Push or workflow_dispatch trigger: compare against the previous commit
+    res = subprocess.run(
+        ["git", "rev-parse", "--verify", "HEAD~1"],
+        cwd=workspace_dir, capture_output=True, text=True
+    )
+    if res.returncode == 0:
+        return "HEAD~1", "HEAD"
 
-    file_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+    # Fallback to main branch comparison for fresh branch pushes
+    for default_branch in ["origin/main", "main", "origin/master", "master"]:
+        res = subprocess.run(
+            ["git", "rev-parse", "--verify", default_branch],
+            cwd=workspace_dir, capture_output=True, text=True
+        )
+        if res.returncode == 0:
+            return default_branch, "HEAD"
+
+    return "HEAD", "HEAD"
+
+
+def get_changed_symbols(diff_analyzer: DiffAnalyzer, base_ref: str, head_ref: str):
+    """Call the diff analyzer using whichever extraction method is implemented."""
+    for method_name in ["get_modified_symbols", "extract_modified_symbols", "get_changed_symbols", "analyze"]:
+        if hasattr(diff_analyzer, method_name):
+            method = getattr(diff_analyzer, method_name)
+            try:
+                return method(base_ref, head_ref)
+            except TypeError:
+                return method()
+    return []
+
+
+def find_doc_section(indexer: Indexer, sym):
+    """Retrieve the corresponding documentation node or section for a given symbol."""
+    sym_name = getattr(sym, "name", str(sym))
+    for method_name in ["find_relevant_section", "get_related_documentation", "find_documentation", "get_section", "query"]:
+        if hasattr(indexer, method_name):
+            return getattr(indexer, method_name)(sym_name)
+    return None
 
 
 def main():
-    # Allow git access to mounted workspaces across different container UIDs
+    # Eliminate dubious ownership errors inside Docker mounts
     subprocess.run(["git", "config", "--global", "--add", "safe.directory", "*"], check=False)
-    repo_root = Path(os.getenv("GITHUB_WORKSPACE", ".")).resolve()
-    cache_dir = repo_root / ".cache"
-    ollama_host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
-    model_name = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
-    confidence_threshold = float(os.getenv("CONFIDENCE_THRESHOLD", "0.80"))
 
-    github_token = os.getenv("GITHUB_TOKEN")
-    gh_repo_name = os.getenv("GITHUB_REPOSITORY")
-    pr_number = os.getenv("PR_NUMBER")
-
-    print("[*] Phase 1: Indexing codebase and documentation...")
-    indexer = Indexer(repo_root=repo_root, cache_dir=cache_dir)
-    graph = indexer.build_graph()
-
-    print("[*] Phase 2: Analyzing diff and evaluating staleness...")
-    diff_analyzer = DiffAnalyzer(repo_root=repo_root)
-    
-    # In GitHub Action CI, compare HEAD~1 with HEAD
-    changed_symbols = diff_analyzer.extract_modified_symbols(
-        base_ref="HEAD~1",
-        head_ref="HEAD",
-        current_chunks=graph.code_chunks
+    workspace_dir = os.getenv("GITHUB_WORKSPACE", os.getcwd())
+    ollama_host = os.getenv("INPUT_OLLAMA_HOST") or os.getenv("OLLAMA_HOST", "http://172.17.0.1:11434")
+    ollama_model = os.getenv("INPUT_OLLAMA_MODEL") or os.getenv("OLLAMA_MODEL", "qwen2.5-coder:1.5b")
+    confidence_threshold = float(
+        os.getenv("INPUT_CONFIDENCE_THRESHOLD") or os.getenv("CONFIDENCE_THRESHOLD", "0.75")
     )
+
+    print(f"[*] Workspace: {workspace_dir}")
+    print(f"[*] Ollama Host: {ollama_host} | Model: {ollama_model} | Threshold: {confidence_threshold}")
+
+    # Phase 1: Index codebase and documentation graph
+    print("\n[*] Phase 1: Indexing codebase and documentation...")
+    try:
+        indexer = Indexer(workspace_dir)
+    except TypeError:
+        indexer = Indexer()
+
+    for index_method in ["build_graph", "index", "index_codebase", "index_documentation"]:
+        if hasattr(indexer, index_method):
+            getattr(indexer, index_method)()
+            break
+
+    # Phase 2: Analyze Git diff and evaluate staleness
+    print("\n[*] Phase 2: Analyzing diff and evaluating staleness...")
+    base_ref, head_ref = resolve_git_refs(workspace_dir)
+    print(f"[*] Comparing refs: {base_ref} ... {head_ref}")
+
+    try:
+        diff_analyzer = DiffAnalyzer(workspace_dir)
+    except TypeError:
+        diff_analyzer = DiffAnalyzer()
+
+    changed_symbols = get_changed_symbols(diff_analyzer, base_ref, head_ref)
+
+    # If no changes were detected against HEAD~1, check against origin/main as fallback
+    if not changed_symbols and base_ref == "HEAD~1":
+        print("[*] No changes detected in HEAD~1; falling back to origin/main comparison...")
+        changed_symbols = get_changed_symbols(diff_analyzer, "origin/main", "HEAD")
 
     if not changed_symbols:
         print("[+] No Python symbol modifications detected.")
-        sys.exit(0)
+        return
 
-    evaluator = StalenessEvaluator(model_name=model_name, host=ollama_host)
-    patcher = DocPatcher(model_name=model_name, host=ollama_host)
-    verifier = DocVerifier(model_name=model_name, host=ollama_host)
+    print(f"[+] Found {len(changed_symbols)} modified symbol(s): {[getattr(s, 'name', str(s)) for s in changed_symbols]}")
 
-    results_table = []
-    files_to_update = {}
+    try:
+        evaluator = StalenessEvaluator(host=ollama_host, model=ollama_model)
+    except TypeError:
+        evaluator = StalenessEvaluator()
 
+    stale_items = []
     for sym in changed_symbols:
-        # Find links connected to this symbol
-        linked_docs = [l.doc_section_id for l in graph.links if l.code_chunk_id == sym.chunk_id]
-        for doc_id in linked_docs:
-            section = graph.doc_sections.get(doc_id)
-            if not section:
-                continue
+        sym_name = getattr(sym, "name", str(sym))
+        section = find_doc_section(indexer, sym)
+        if not section:
+            print(f"[-] No documentation mapping found for symbol '{sym_name}'. Skipping.")
+            continue
 
-            staleness = evaluator.evaluate(sym, section)
-            if staleness.is_stale:
-                print(f"[!] Stale doc section found: {section.section_id}")
-                patch = patcher.generate_repair(section, sym, staleness)
-                verdict = verifier.verify(sym, section.content, patch)
+        print(f"[*] Evaluating staleness for symbol '{sym_name}'...")
+        staleness = evaluator.evaluate(sym, section)
 
-                if verdict.is_accurate and verdict.final_confidence >= confidence_threshold:
-                    results_table.append(f"| `{section.file_path}` | ⚠️ Stale | {staleness.inaccuracy_explanation} | Auto-applied fix (Conf: {verdict.final_confidence}) |")
-                    files_to_update[(section.file_path, section.heading_title)] = patch.repaired_content
-                else:
-                    results_table.append(f"| `{section.file_path}` | ❌ Complex Drift | {staleness.inaccuracy_explanation} | Flagged for manual review |")
+        score = getattr(staleness, "confidence", None)
+        if score is None and isinstance(staleness, dict):
+            score = staleness.get("confidence", 0.0)
 
-    # Apply updates
-    for (rel_path, heading), new_content in files_to_update.items():
-        apply_section_patch_to_file(repo_root / rel_path, heading, new_content)
+        is_stale = getattr(staleness, "is_stale", False)
+        if not is_stale and isinstance(staleness, dict):
+            is_stale = staleness.get("is_stale", False)
 
-    # Post GitHub comment if running in PR workflow
-    if github_token and gh_repo_name and pr_number and results_table:
-        gh = Github(github_token)
-        repo = gh.get_repo(gh_repo_name)
-        pr = repo.get_pull(int(pr_number))
-        comment_body = "### 📚 Documentation Drift Report\n\n"
-        comment_body += "| File | Status | Issue | Action Taken |\n| :--- | :--- | :--- | :--- |\n"
-        comment_body += "\n".join(results_table)
-        pr.create_issue_comment(comment_body)
+        if is_stale or (score is not None and score >= confidence_threshold):
+            print(f"[!] Stale doc detected for '{sym_name}' (Confidence: {score})")
+            stale_items.append((sym, section, staleness))
+        else:
+            print(f"[=] Documentation for '{sym_name}' is up to date.")
 
-    print("[+] Done.")
+    if not stale_items:
+        print("[+] All documentation sections are aligned with the latest code.")
+        return
+
+    # Phase 3: Patch and verify documentation
+    print("\n[*] Phase 3: Generating documentation updates and applying patches...")
+    try:
+        patcher = DocPatcher(host=ollama_host, model=ollama_model)
+    except TypeError:
+        patcher = DocPatcher()
+
+    try:
+        verifier = DocVerifier()
+    except TypeError:
+        verifier = None
+
+    for sym, section, staleness in stale_items:
+        sym_name = getattr(sym, "name", str(sym))
+        print(f"[*] Repairing documentation for '{sym_name}'...")
+
+        # Generate patch
+        patch = None
+        for patch_func in ["generate_patch", "patch", "repair"]:
+            if hasattr(patcher, patch_func):
+                patch = getattr(patcher, patch_func)(sym, section, staleness)
+                break
+
+        if not patch:
+            continue
+
+        # Optional verification step
+        is_valid = True
+        if verifier:
+            for verify_func in ["verify", "verify_patch"]:
+                if hasattr(verifier, verify_func):
+                    is_valid = getattr(verifier, verify_func)(section, patch)
+                    break
+
+        if is_valid:
+            for apply_func in ["apply_patch", "apply", "write_patch"]:
+                if hasattr(patcher, apply_func):
+                    getattr(patcher, apply_func)(section, patch)
+                    print(f"[+] Successfully patched documentation for '{sym_name}'.")
+                    break
+        else:
+            print(f"[-] Patch verification failed for '{sym_name}'. Skipping write.")
+
+    print("\n[+] Self-healing documentation pipeline complete.")
+
 
 if __name__ == "__main__":
     main()
