@@ -1,4 +1,4 @@
-name: "Self-Healing Docs (Local Ollama)"
+name: "Self-Healing Documentation"
 
 on:
   pull_request:
@@ -11,39 +11,45 @@ permissions:
   pull-requests: write
 
 jobs:
-  doc-healing:
-    runs-on: self-hosted
+  auto-heal:
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
         with:
-          # Check out the actual PR branch, not the detached merge commit
           ref: ${{ github.head_ref }}
           fetch-depth: 2
 
-      - name: Set up Python
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
 
-      - name: Install Dependencies
+      - name: Install Project Dependencies
         run: |
+          pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Self-Healing Documentation Engine
+      - name: Launch Free Cloud Ollama
+        run: |
+          curl -fsSL https://ollama.com/install.sh | sh
+          ollama serve &
+          sleep 4
+          ollama pull qwen2.5-coder:1.5b
+
+      - name: Run Self-Healing Engine
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           OLLAMA_HOST: "http://localhost:11434"
-          OLLAMA_MODEL: "qwen2.5-coder:7b"
+          OLLAMA_MODEL: "qwen2.5-coder:1.5b"
           CONFIDENCE_THRESHOLD: "0.75"
         run: |
           python -m src.runner
 
-      - name: Commit and Push Documentation Fixes
-        shell: bash
+      - name: Push Documentation Updates
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
@@ -52,5 +58,5 @@ jobs:
             git commit -m "docs: auto-heal documentation drift [skip ci]"
             git push
           else
-            echo "Documentation is already up to date."
+            echo "Documentation is already aligned with code."
           fi
