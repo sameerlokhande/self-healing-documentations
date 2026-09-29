@@ -86,12 +86,18 @@ def main():
     print(f"[*] Workspace: {workspace_dir}")
     print(f"[*] Ollama Host: {ollama_host} | Model: {ollama_model} | Threshold: {confidence_threshold}")
 
-    # Phase 1: Index codebase and documentation graph
+   # Phase 1: Index codebase and documentation graph
     print("\n[*] Phase 1: Indexing codebase and documentation...")
+    cache_dir = os.path.join(workspace_dir, ".cache", "doc_indexer")
+    os.makedirs(cache_dir, exist_ok=True)
+
     try:
-        indexer = Indexer(workspace_dir)
+        indexer = Indexer(workspace_dir, cache_dir)
     except TypeError:
-        indexer = Indexer()
+        try:
+            indexer = Indexer(repo_root=workspace_dir, cache_dir=cache_dir)
+        except TypeError:
+            indexer = Indexer(workspace_dir)
 
     for index_method in ["build_graph", "index", "index_codebase", "index_documentation"]:
         if hasattr(indexer, index_method):
